@@ -1,2 +1,2 @@
-# neutrino_showers_reconstruction
-Reconstruction and generation of 3D shower structures for neutrino experiments
+# Neutrino_showers_reconstruction
+Reconstruction of 3D shower structures for OPERA neutrino experiments
