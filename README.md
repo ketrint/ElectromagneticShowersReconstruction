@@ -25,3 +25,4 @@ Clusters Examples:
 
 ### Running the code
 
+training_classifier.py predicts the probability of edge to connect vertices of one shower. The probability will be then used as edge weight for proposed clusterization algorithm in clustering.py.
