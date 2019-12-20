@@ -16,7 +16,7 @@ X, Y, Z coordinates and the direction of the EM Showers base-tracks.
 
 The showers are generated using FairShip framework. 
 
-![Experimental Data](./docs/data.png)
+![Experimental Data](./docs/data.png | width=100)
 
 #### Results
 
