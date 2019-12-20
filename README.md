@@ -16,14 +16,14 @@ X, Y, Z coordinates and the direction of the EM Showers base-tracks.
 
 The showers are generated using FairShip framework. 
 
-![Experimental Data](./docs/img/data.png)
+![Experimental Data](./docs/data.png)
 
 #### Results
 
 The algorithm detects ~ 65% of Showers and assess the coordinates and direction of base-tracks with ~ 75% accuracy.
 
 Clusters Examples:
-![Clusters Examples](./docs/img/Clusters_Examples.png)
+![Clusters Examples](./docs/Clusters_Examples.png)
 
 ### Running the code
 
