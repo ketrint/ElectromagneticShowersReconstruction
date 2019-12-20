@@ -23,7 +23,7 @@ The showers are generated using FairShip framework.
 The algorithm detects ~ 65% of Showers and assess the coordinates and direction of base-tracks with ~ 75% accuracy.
 
 Clusters Examples:
-![Clusters Examples](./docs/Clusters_Examples.png)
+![Clusters Examples](./docs/Clusters_Example.png)
 
 ### Running the code
 
