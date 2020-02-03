@@ -16,6 +16,8 @@ X, Y, Z coordinates and the direction of the EM Showers base-tracks.
 
 The showers are generated using FairShip framework. 
 
+Data for graph generation is located here: https://gitlab.com/SchattenGenie/shower_generation/blob/master/data/mcdata_taue2.root
+
 #### Results
 
 The algorithm detects ~ 65% of Showers and assess the coordinates and direction of base-tracks with ~ 75% accuracy.
