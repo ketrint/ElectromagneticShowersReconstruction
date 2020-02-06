@@ -12,6 +12,33 @@ from torch_geometric.nn import NNConv, GCNConv, GraphConv
 from torch_geometric.nn import PointConv, EdgeConv, SplineConv
 
 
+class EdgeConv(MessagePassing):   
+    def __init__(self, nn, aggr='max', **kwargs):
+        super(EdgeConv, self).__init__(aggr=aggr, **kwargs)
+        self.nn = nn
+        self.reset_parameters()
+
+
+    def reset_parameters(self):
+        reset(self.nn)
+
+
+    def forward(self, x, edge_index, dist):
+        print(x.shape, edge_index.shape, dist.shape)
+        """"""
+        x = x.unsqueeze(-1) if x.dim() == 1 else x
+      
+        return self.propagate(edge_index, x=x, dist=dist)
+
+
+    def message(self, x_i, x_j, dist):
+        print(x_i.shape, len(dist))
+        return self.nn(torch.cat([x_i, x_j - x_i, dist], dim=1))
+
+    def __repr__(self):
+        return '{}(nn={})'.format(self.__class__.__name__, self.nn)      
+    
+    
 class EmulsionConv(MessagePassing):
     def __init__(self, in_channels, out_channels, edge_dim):
         super().__init__(aggr='add')
