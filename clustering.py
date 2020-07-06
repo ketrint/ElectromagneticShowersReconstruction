@@ -1,45 +1,81 @@
 import comet_ml
 from comet_ml import Experiment
 import numpy as np
-from collections import deque
 import torch
 import torch.nn as nn
 import click
-from nets import GraphNN_KNN_v1_v1, EdgeClassifier_v3
+from nets import *
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import roc_auc_score, roc_curve, precision_recall_curve, accuracy_score, average_precision_score
 from torch_geometric.data import DataLoader
 from preprocessing import preprocess_dataset
-from utils import RunningAverageMeter, plot_aucs
+from viz_utils import RunningAverageMeter, plot_aucs
 from tqdm import tqdm
 import networkx as nx
-from hdbscan_ import run_hdbscan_on_brick, run_hdbscan
+from custom_hdbscan import run_hdbscan_on_brick, run_hdbscan
+from custom_hdbscan import run_vanilla_hdbscan, run_vanilla_hdbscan_on_brick
 import clustering_metrics
 from clustering_metrics import class_disbalance_graphx, class_disbalance_graphx__
 from clustering_metrics import estimate_e, estimate_start_xyz, estimate_txty
-from sklearn.linear_model import TheilSenRegressor, LinearRegression, HuberRegressor, RANSACRegressor
-from sklearn.model_selection import cross_val_predict
+from sklearn.linear_model import TheilSenRegressor, LinearRegression, HuberRegressor
+from sys_utils import get_freer_gpu, str_to_class
+import itertools
+from operator import itemgetter
+import sys
 
 
-
-from random import seed
-from random import randrange
+def str_to_class(classname: str):
+    """
+    Function to get class object by its name signature
+    :param classname: str
+        name of the class
+    :return: class object with the same name signature as classname
+    """
+    return getattr(sys.modules[__name__], classname)
 
 
 def predict_one_shower(shower, graph_embedder, edge_classifier):
+    # TODO: batch training
     embeddings = graph_embedder(shower)
-    edge_labels_true = (shower.y[shower.edge_index[0]] == shower.y[shower.edge_index[1]]).view(-1)
-    edge_data = torch.cat([
-        embeddings[shower.edge_index[0]],
-        embeddings[shower.edge_index[1]]
-    ], dim=1)
-    edge_labels_predicted = edge_classifier(edge_data).view(-1)
-
-    return edge_labels_true, edge_labels_predicted
+    edge_labels_true = (~(shower.y[shower.edge_index[0]] == shower.y[shower.edge_index[1]])).view(-1)
+    edge_labels_predicted = edge_classifier(shower=shower, embeddings=embeddings, edge_index=shower.edge_index).view(-1)
+    return edge_labels_true, torch.clamp(edge_labels_predicted, 1e-6, 1 - 1e-6)
 
 
-def preprocess_torch_shower_to_nx(shower, graph_embedder, edge_classifier, threshold=0.5):
-    node_id = 0
+def k_nearest_cut_succ(graphx, k):
+    for node_id in tqdm(graphx.nodes()):
+        successors = list(graphx.successors(node_id))
+        if len(successors) <= k:
+            continue
+        edges = list(itertools.product([node_id], successors))
+        weights = []
+        for edge in edges:
+            weights.append(graphx[edge[0]][edge[1]]['weight'])
+        weights, edges = [list(x) for x in zip(*sorted(zip(weights, edges), key=itemgetter(0)))]
+        edges_to_remove = edges[k:]
+        if len(edges_to_remove):
+            graphx.remove_edges_from(edges_to_remove)
+    return graphx
+
+
+def k_nearest_cut_pred(graphx, k):
+    for node_id in tqdm(graphx.nodes()):
+        predecessors = list(graphx.predecessors(node_id))
+        if len(predecessors) <= k:
+            continue
+        edges = list(itertools.product(predecessors, [node_id]))
+        weights = []
+        for edge in edges:
+            weights.append(graphx[edge[0]][edge[1]]['weight'])
+        weights, edges = [list(x) for x in zip(*sorted(zip(weights, edges), key=itemgetter(0)))]
+
+        edges_to_remove = edges[k:]
+        if len(edges_to_remove):
+            graphx.remove_edges_from(edges_to_remove)
+    return graphx
+
+
+def preprocess_torch_shower_to_nx(shower, graph_embedder, edge_classifier, add_noise=0., threshold=0.5, baseline=False):
     G = nx.DiGraph()
     nodes_to_add = []
     showers_data = []
@@ -59,6 +95,7 @@ def preprocess_torch_shower_to_nx(shower, graph_embedder, edge_classifier, thres
                 'ele_TY': shower_data[5]
             }
         )
+    node_id = 0
     for k in range(len(y)):
         nodes_to_add.append(
             (
@@ -78,13 +115,22 @@ def preprocess_torch_shower_to_nx(shower, graph_embedder, edge_classifier, thres
         node_id += 1
 
     edges_to_add = []
-    _, weights = predict_one_shower(shower, graph_embedder=graph_embedder, edge_classifier=edge_classifier)
-    weights = weights.detach().cpu().numpy()
-    edge_index = shower.edge_index.t().detach().cpu().numpy()
-    edge_index = edge_index[weights > threshold]
-    weights = weights[weights > threshold]
-    weights = -np.log(weights)  # TODO: which transformation to use?
-    print(len(weights))
+    if not baseline:
+        _, weights = predict_one_shower(shower, graph_embedder=graph_embedder, edge_classifier=edge_classifier)
+        weights = weights.detach().cpu().numpy()
+        weights = -np.log((1 - weights) / weights)
+        edge_index = shower.edge_index.t().detach().cpu().numpy()
+        # weights = np.percentile(weights, q=90)
+        edge_index = edge_index[weights > threshold]
+        weights = -weights[weights > threshold]
+    else:
+        weights = shower.edge_attr.view(-1).detach().cpu().numpy()
+        edge_index = shower.edge_index.t().detach().cpu().numpy()
+        weights = np.exp(weights)
+        edge_index = edge_index[weights < threshold]
+        weights = weights[weights < threshold]
+        weights = np.random.randn(len(weights)) * np.std(weights) * add_noise + weights
+
     for k, (p0, p1) in enumerate(edge_index):
         edges_to_add.append((p0, p1, weights[k]))
 
@@ -104,34 +150,34 @@ def calc_clustering_metrics(clusterized_bricks, experiment):
     number_of_stucked_showers = 0
     total_number_of_showers = 0
     number_of_good_showers = 0
-    number_of_survived_showers = 0
     second_to_first_ratios = []
 
-    E_raw = deque()
-    E_true = deque()
+    E_raw = []
+    E_true = []
 
-    x_raw = deque()
-    x_true = deque()
+    ER_whole = []
 
-    y_raw = deque()
-    y_true = deque()
+    x_raw = []
+    x_true = []
 
-    z_raw = deque()
-    z_true = deque()
+    y_raw = []
+    y_true = []
 
-    tx_raw = deque()
-    tx_true = deque()
+    z_raw = []
+    z_true = []
 
-    ty_raw = deque()
-    ty_true = deque()
+    tx_raw = []
+    tx_true = []
+
+    ty_raw = []
+    ty_true = []
     for clusterized_brick in clusterized_bricks:
         showers_data = clusterized_brick['graphx'].graph['showers_data']
         clusters = clusterized_brick['clusters']
         for shower_data in showers_data:
-            shower_data['clusters'] = deque()
+            shower_data['clusters'] = []
 
         for cluster in clusters:
-            print(class_disbalance_graphx(cluster))
             selected_tracks += len(cluster)
             for label, label_count in class_disbalance_graphx(cluster):
                 if label_count / showers_data[label]['numtracks'] >= 0.1:
@@ -150,8 +196,6 @@ def calc_clustering_metrics(clusterized_bricks, experiment):
                 signals_per_cluster.append(counts[labels == shower_data['signal']][0])
                 idx_cluster.append(i)
             signals_per_cluster = np.array(signals_per_cluster)
-            idx_cluster = np.array(idx_cluster)
-            second_to_first_ratio = 0.
 
             if len(signals_per_cluster) == 0:
                 number_of_lost_showers += 1
@@ -171,6 +215,8 @@ def calc_clustering_metrics(clusterized_bricks, experiment):
 
             labels, counts = class_disbalance_graphx__(cluster)
             counts = counts / counts.sum()
+            
+
             # high contamination
             if counts[labels == shower_data['signal']] < 0.9:
                 number_of_stucked_showers += 1
@@ -185,6 +231,13 @@ def calc_clustering_metrics(clusterized_bricks, experiment):
             # E
             E_raw.append(estimate_e(cluster))
             E_true.append(shower_data['ele_P'])
+            
+            r = HuberRegressor()
+            r.fit(X = E_raw.reshape((-1, 1)), y=E_true, sample_weight=1 / E_true**6)
+            E_pred_single = r.predict(E_raw.reshape((-1, 1)))
+            ER_whole.append(np.std((E_true - E_pred_single) / E_true))
+            
+            
 
             # x, y, z
             x, y, z = estimate_start_xyz(cluster)
@@ -195,7 +248,6 @@ def calc_clustering_metrics(clusterized_bricks, experiment):
             y_raw.append(y)
             y_true.append(shower_data['ele_SY'])
 
-            print('our', z, 'true', shower_data['ele_SZ'])
             z_raw.append(z)
             z_true.append(shower_data['ele_SZ'])
 
@@ -226,56 +278,10 @@ def calc_clustering_metrics(clusterized_bricks, experiment):
     ty_raw = np.array(ty_raw)
     ty_true = np.array(ty_true)
 
-    #r = RANSACRegressor()   
-    #r.fit(X=E_raw.reshape((-1, 1)), y=E_true, sample_weight=1/ E_true**6)
-    
-    #E_pred = cross_val_predict(r, E_raw.reshape((-1, 1)), E_true, cv=5) 
-    #E_pred = r.predict(E_raw.reshape((-1, 1)))
-    
-    # Split a dataset into k folds
-    def cross_validation_split(dataset, folds=5):
-        dataset_split = list()
-        dataset_copy = list(dataset)
-        fold_size = int(len(dataset) / folds)
-        for i in range(folds):
-            fold = list()
-            while len(fold) < fold_size:
-                index = randrange(len(dataset_copy))
-                fold.append(dataset_copy.pop(index))
-            dataset_split.append(fold)
-        return dataset_split
+    r = HuberRegressor()
+    r.fit(X=E_raw.reshape((-1, 1)), y=E_true, sample_weight=1 / E_true**6)
+    E_pred = r.predict(E_raw.reshape((-1, 1)))
 
-    # test cross validation split
-    seed(1)
-    dataset = E_raw.reshape((-1, 1))
-    print(dataset.shape)
-    folds = cross_validation_split(dataset, 5)
-    y = cross_validation_split(E_true, 5)
-    print(len(folds))
-    
-    
-    E_pred = []
-    for i in range(len(folds)):
-        folds_ = folds.copy()
-        y_ = y.copy()
-        
-        r = HuberRegressor()
-        X = folds_.pop(i)
-        Y = y_.pop(i)
-        
-        folds_new = np.array([item for sublist in folds_ for item in sublist])
-        y_new = np.array([item for sublist in y_ for item in sublist])
-
-        r.fit(folds_new, y_new, sample_weight=1/(y_new)**6)
-        
-        Y_pred = r.predict(X)      
-        print(np.std((Y - Y_pred) / Y))
-        
-        E_pred.append(Y_pred)
-    
-             
-    E_pred = np.array(E_pred).reshape((-1, 1))
-    E_true = np.array(y).reshape((-1, 1))
     scale_mm = 10000
     print('Energy resolution = {}'.format(np.std((E_true - E_pred) / E_true)))
     print()
@@ -294,6 +300,8 @@ def calc_clustering_metrics(clusterized_bricks, experiment):
     print('MAE for ty = {}'.format(np.abs((ty_raw - ty_true)).mean()))
 
     experiment.log_metric('Energy resolution', (np.std((E_true - E_pred) / E_true)))
+    experiment.log_metric('Energy resolution of singles', ER_whole)    
+    
     print()
     experiment.log_metric('Track efficiency', (selected_tracks / total_tracks))
     print()
@@ -310,42 +318,86 @@ def calc_clustering_metrics(clusterized_bricks, experiment):
     experiment.log_metric('MAE for ty', (np.abs((ty_raw - ty_true)).mean()))
 
 
+
 @click.command()
-@click.option('--datafile', type=str, default='./data/train.pt')
+@click.option('--datafile', type=str, default='./data/train_200_preprocessed.pt')
 @click.option('--project_name', type=str, prompt='Enter project name', default='em_showers_clustering')
-@click.option('--work_space', type=str, prompt='Enter workspace name')
-@click.option('--dim_out', type=int, default=10)
+@click.option('--workspace', type=str, prompt='Enter workspace name')
 @click.option('--min_cl', type=int, default=40)
+@click.option('--min_samples_core', type=int, default=4)
 @click.option('--cl_size', type=int, default=40)
-@click.option('--threshold', type=float, default=0.65)
+@click.option('--add_noise', type=float, default=0.)
+@click.option('--threshold', type=float, default=0.5)
+@click.option('--vanilla_hdbscan', type=bool, default=False)
+@click.option('--baseline', type=bool, default=False)
+@click.option('--hidden_dim', type=int, default=32)
+@click.option('--output_dim', type=int, default=32)
+@click.option('--num_layers_emulsion', type=int, default=3)
+@click.option('--num_layers_edge_conv', type=int, default=5)
+@click.option('--graph_embedder', type=str, default='GraphNN_KNN_v1')
+@click.option('--edge_classifier', type=str, default='EdgeClassifier_v1')
+@click.option('--graph_embedder_weights', type=str, default='GraphNN_KNN_v1')
+@click.option('--edge_classifier_weights', type=str, default='EdgeClassifier_v1')
 def main(
-        datafile='./data/train.pt',
-        dim_out=10, min_cl=40, cl_size=40,
-        threshold=0.65,
+        datafile='./data/train_200_preprocessed.pt',
+        hidden_dim=12,
+        output_dim=12,
+        num_layers_emulsion=3,
+        num_layers_edge_conv=3,
+        cl_size=40,
+        min_cl=40,
+        min_samples_core=5,
+        vanilla_hdbscan=False,
+        threshold=0.9,
+        add_noise=0.,
         project_name='em_showers_clustering',
-        work_space='ketrint'
+        workspace='schattengenie',
+        graph_embedder='GraphNN_KNN_v1',
+        edge_classifier='EdgeClassifier_v1',
+        baseline=False,
+        graph_embedder_weights='GraphNN_KNN_v1', 
+        edge_classifier_weights='EdgeClassifier_v1'
 ):
-    experiment = Experiment(project_name=project_name, workspace=work_space)
+    experiment = Experiment(project_name=project_name, workspace=workspace)
+    #, offline_directory="/home/vbelavin/comet_ml_offline")
     device = torch.device('cpu')
-    showers = preprocess_dataset(datafile)
-
-    k = showers[0].x.shape[1]
-    print(k)
-    graph_embedder = GraphNN_KNN_v1_v1(dim_out=dim_out, k=k).to(device)
-    edge_classifier = EdgeClassifier_v3(dim_out=dim_out)
-
-    graph_embedder.load_state_dict(torch.load('graph_embedder_v1_v1v3.pt', map_location=device))
+    showers = torch.load(datafile)
+    input_dim = showers[0].x.shape[1]
+    edge_dim = showers[0].edge_features.shape[1]
+    showers = DataLoader(showers, batch_size=1, shuffle=False)
+    graph_embedder = str_to_class(graph_embedder)(
+        output_dim=output_dim,
+        hidden_dim=hidden_dim,
+        edge_dim=edge_dim,
+        num_layers_emulsion=num_layers_emulsion,
+        num_layers_edge_conv=num_layers_edge_conv,
+        input_dim=input_dim,
+    ).to(device)
+    edge_classifier = str_to_class(edge_classifier)(
+        input_dim=2 * output_dim + edge_dim,
+    ).to(device)
+    if not baseline:
+        graph_embedder.load_state_dict(torch.load(graph_embedder_weights, map_location=device))
+        edge_classifier.load_state_dict(torch.load(edge_classifier_weights, map_location=device))
     graph_embedder.eval()
-    edge_classifier.load_state_dict(torch.load('edge_classifier_v1_v1v3.pt', map_location=device))
     edge_classifier.eval()
 
     clusterized_bricks = []
     for shower in showers:
-        G = preprocess_torch_shower_to_nx(shower,
-                                          graph_embedder=graph_embedder,
-                                          edge_classifier=edge_classifier,
-                                          threshold=threshold)
-        graphx, clusters, roots = run_hdbscan_on_brick(G, min_cl=min_cl, cl_size=cl_size)
+        G = preprocess_torch_shower_to_nx(
+            shower,
+            graph_embedder=graph_embedder,
+            edge_classifier=edge_classifier,
+            threshold=threshold,
+            add_noise=add_noise,
+            baseline=baseline
+        )
+        k_nearest_cut_succ(G, 25)
+        k_nearest_cut_pred(G, 25)
+        if vanilla_hdbscan:
+            graphx, clusters, roots = run_vanilla_hdbscan_on_brick(G, min_cl=min_cl, cl_size=cl_size, min_samples_core=min_samples_core)
+        else:
+            graphx, clusters, roots = run_hdbscan_on_brick(G, min_cl=min_cl, cl_size=cl_size, min_samples_core=min_samples_core)
         clusters_graphx = []
         for cluster in clusters:
             clusters_graphx.append(
@@ -356,7 +408,6 @@ def main(
             'clusters': clusters_graphx,
         }
         clusterized_bricks.append(clusterized_brick)
-        
 
     calc_clustering_metrics(clusterized_bricks, experiment=experiment)
 
