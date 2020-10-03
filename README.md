@@ -20,7 +20,7 @@ Data for graph generation is located here: https://gitlab.com/SchattenGenie/show
 
 #### Results
 
-The algorithm detects ~ 65% of Showers and assess the coordinates and direction of base-tracks with ~ 75% accuracy.
+The algorithm detects ~ 86% of Showers and assess the coordinates and direction of base-tracks with ~ 75% accuracy.
 
 Clusters Examples:
 ![Clusters Examples](./docs/Clusters_Example.png)
