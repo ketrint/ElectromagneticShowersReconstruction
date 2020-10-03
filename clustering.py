@@ -18,10 +18,12 @@ import clustering_metrics
 from clustering_metrics import class_disbalance_graphx, class_disbalance_graphx__
 from clustering_metrics import estimate_e, estimate_start_xyz, estimate_txty
 from sklearn.linear_model import TheilSenRegressor, LinearRegression, HuberRegressor
+from sklearn import svm
 from sys_utils import get_freer_gpu, str_to_class
 import itertools
 from operator import itemgetter
 import sys
+from sklearn import svm
 
 
 def str_to_class(classname: str):
@@ -141,9 +143,10 @@ def preprocess_torch_shower_to_nx(shower, graph_embedder, edge_classifier, add_n
     return G
 
 
-def calc_clustering_metrics(clusterized_bricks, experiment):
+def calc_clustering_metrics(clusterized_bricks, experiment, energy_true_file, energy_file):
     selected_tracks = 0
     total_tracks = 0
+
 
     number_of_lost_showers = 0
     number_of_broken_showers = 0
@@ -152,10 +155,12 @@ def calc_clustering_metrics(clusterized_bricks, experiment):
     number_of_good_showers = 0
     second_to_first_ratios = []
 
+    ER_one = []
+    
     E_raw = []
     E_true = []
-
-    ER_whole = []
+    E_true_all = []
+    E = []
 
     x_raw = []
     x_true = []
@@ -171,7 +176,10 @@ def calc_clustering_metrics(clusterized_bricks, experiment):
 
     ty_raw = []
     ty_true = []
+    n_showers = []
     for clusterized_brick in clusterized_bricks:
+        
+
         showers_data = clusterized_brick['graphx'].graph['showers_data']
         clusters = clusterized_brick['clusters']
         for shower_data in showers_data:
@@ -180,11 +188,16 @@ def calc_clustering_metrics(clusterized_bricks, experiment):
         for cluster in clusters:
             selected_tracks += len(cluster)
             for label, label_count in class_disbalance_graphx(cluster):
+                print('n showers:', len(showers_data))
+                print(label)
                 if label_count / showers_data[label]['numtracks'] >= 0.1:
                     showers_data[label]['clusters'].append(cluster)
 
         for shower_data in showers_data:
             total_tracks += shower_data['numtracks']
+            E.append(shower_data['numtracks'])
+            E_true_all.append(shower_data['ele_P'])
+            n_showers.append(len(showers_data))
 
         for shower_data in showers_data:
             total_number_of_showers += 1
@@ -215,8 +228,6 @@ def calc_clustering_metrics(clusterized_bricks, experiment):
 
             labels, counts = class_disbalance_graphx__(cluster)
             counts = counts / counts.sum()
-            
-
             # high contamination
             if counts[labels == shower_data['signal']] < 0.9:
                 number_of_stucked_showers += 1
@@ -230,96 +241,107 @@ def calc_clustering_metrics(clusterized_bricks, experiment):
             number_of_good_showers += 1
             # E
             E_raw.append(estimate_e(cluster))
+           
             E_true.append(shower_data['ele_P'])
             
-            r = HuberRegressor()
-            r.fit(X = E_raw.reshape((-1, 1)), y=E_true, sample_weight=1 / E_true**6)
-            E_pred_single = r.predict(E_raw.reshape((-1, 1)))
-            ER_whole.append(np.std((E_true - E_pred_single) / E_true))
-            
-            
-
             # x, y, z
-            x, y, z = estimate_start_xyz(cluster)
+            #x, y, z = estimate_start_xyz(cluster)
 
-            x_raw.append(x)
-            x_true.append(shower_data['ele_SX'])
+           # x_raw.append(x)
+            #x_true.append(shower_data['ele_SX'])
 
-            y_raw.append(y)
-            y_true.append(shower_data['ele_SY'])
+           # y_raw.append(y)
+           # y_true.append(shower_data['ele_SY'])
 
-            z_raw.append(z)
-            z_true.append(shower_data['ele_SZ'])
+          #  z_raw.append(z)
+           # z_true.append(shower_data['ele_SZ'])
 
             # tx, ty
-            tx, ty = estimate_txty(cluster)
+           # tx, ty = estimate_txty(cluster)
 
-            tx_raw.append(tx)
-            tx_true.append(shower_data['ele_TX'])
+            #tx_raw.append(tx)
+            #tx_true.append(shower_data['ele_TX'])
 
-            ty_raw.append(ty)
-            ty_true.append(shower_data['ele_TY'])
+           # ty_raw.append(ty)
+         #  ty_true.append(shower_data['ele_TY'])
+    # E_raw = np.array(E_raw)
+    # np.save(energy_file, E_raw)
+    # E_true = np.array(E_true)
+    #np.save(energy_true_file, E_true)
+    	
+        r = HuberRegressor()
+        r.fit(X=np.array(E_raw).reshape((-1, 1)), y=E_true)
+        
+        E_pred = r.predict(np.array(E_raw).reshape((-1, 1)))
 
-    E_raw = np.array(E_raw)
-    E_true = np.array(E_true)
+        ER_one.append(np.std((np.array(E_true) - E_pred) / np.array(E_true)))
+       
 
-    x_raw = np.array(x_raw)
-    x_true = np.array(x_true)
+    n_showers = np.array(n_showers)
+    np.save('n_showers.npy',n_showers)
+    E = np.array(E)
+    np.save('E.npy',E)
+    ER_one = np.array(ER_one)
+    np.save('ER.npy', ER_one)
+    E_true_all = np.array(E_true_all)
+    np.save('E_true_all.npy', E_true_all)
+    #experiment.log_metric('Energy resolution', (ER_one.mean()))
+    #experiment.log_metric('Energy resolution STD', (ER_one.std()))
+    experiment.log_metric('Energy resolution', (np.std((E_true - E_pred) / E_true)))
+    print('Energy resolution = {}'.format(np.std((E_true - E_pred) / E_true)))
 
-    y_raw = np.array(y_raw)
-    y_true = np.array(y_true)
+    experiment.log_metric('Good showers', (number_of_good_showers / total_number_of_showers))
+    print('Good showers = {}'.format(number_of_good_showers / total_number_of_showers))
+   # E_raw = np.array(E_raw)
+   # E_true = np.array(E_true)
 
-    z_raw = np.array(z_raw)
-    z_true = np.array(z_true)
+   # x_raw = np.array(x_raw)
+    #x_true = np.array(x_true)
 
-    tx_raw = np.array(tx_raw)
-    tx_true = np.array(tx_true)
+   # y_raw = np.array(y_raw)
+    #y_true = np.array(y_true)
 
-    ty_raw = np.array(ty_raw)
-    ty_true = np.array(ty_true)
+   # z_raw = np.array(z_raw)
+    #z_true = np.array(z_true)
 
-    r = HuberRegressor()
-    r.fit(X=E_raw.reshape((-1, 1)), y=E_true, sample_weight=1 / E_true**6)
-    E_pred = r.predict(E_raw.reshape((-1, 1)))
+   # tx_raw = np.array(tx_raw)
+    #tx_true = np.array(tx_true)
+
+    #ty_raw = np.array(ty_raw)
+    #ty_true = np.array(ty_true)
+
+   # r = svm.LinearSVR()
+   # r.fit(X=E_raw.reshape((-1, 1)), y=E_true)
+  #  E_pred = r.predict(E_raw.reshape((-1, 1)))
 
     scale_mm = 10000
-    print('Energy resolution = {}'.format(np.std((E_true - E_pred) / E_true)))
+   # print('Energy resolution = {}'.format(np.std((E_true - E_pred) / E_true)))
     print()
-    print('Track efficiency = {}'.format(selected_tracks / total_tracks))
+   # print('Track efficiency = {}'.format(selected_tracks / total_tracks))
+  #  print()
+ #   print('Good showers = {}'.format(number_of_good_showers / total_number_of_showers))
+ 
+    #experiment.log_metric('Energy resolution', (np.std((E_true - E_pred) / E_true)))
     print()
-    print('Good showers = {}'.format(number_of_good_showers / total_number_of_showers))
-    print('Stuck showers = {}'.format(number_of_stucked_showers / total_number_of_showers))
-    print('Broken showers = {}'.format(number_of_broken_showers / total_number_of_showers))
-    print('Lost showers = {}'.format(number_of_lost_showers / total_number_of_showers))
+   # experiment.log_metric('Track efficiency', (selected_tracks / total_tracks))
     print()
-    print('MAE for x = {}'.format(np.abs((x_raw * scale_mm - x_true) / scale_mm).mean()))
-    print('MAE for y = {}'.format(np.abs((y_raw * scale_mm - y_true) / scale_mm).mean()))
-    print('MAE for z = {}'.format(np.abs((z_raw * scale_mm - z_true) / scale_mm).mean()))
+    #experiment.log_metric('Good showers', (number_of_good_showers / total_number_of_showers))
+   # experiment.log_metric('Stuck showers', (number_of_stucked_showers / total_number_of_showers))
+  #  experiment.log_metric('Broken showers', (number_of_broken_showers / total_number_of_showers))
+  #  experiment.log_metric('Lost showers', (number_of_lost_showers / total_number_of_showers))
     print()
-    print('MAE for tx = {}'.format(np.abs((tx_raw - tx_true)).mean()))
-    print('MAE for ty = {}'.format(np.abs((ty_raw - ty_true)).mean()))
-
-    experiment.log_metric('Energy resolution', (np.std((E_true - E_pred) / E_true)))
-    experiment.log_metric('Energy resolution of singles', ER_whole)    
-    
+    #experiment.log_metric('MAE for x', (np.abs((x_raw * scale_mm - x_true) / scale_mm).mean()))
+   # experiment.log_metric('MAE for y', (np.abs((y_raw * scale_mm - y_true) / scale_mm).mean()))
+  #  experiment.log_metric('MAE for z', (np.abs((z_raw * scale_mm - z_true) / scale_mm).mean()))
     print()
-    experiment.log_metric('Track efficiency', (selected_tracks / total_tracks))
-    print()
-    experiment.log_metric('Good showers', (number_of_good_showers / total_number_of_showers))
-    experiment.log_metric('Stuck showers', (number_of_stucked_showers / total_number_of_showers))
-    experiment.log_metric('Broken showers', (number_of_broken_showers / total_number_of_showers))
-    experiment.log_metric('Lost showers', (number_of_lost_showers / total_number_of_showers))
-    print()
-    experiment.log_metric('MAE for x', (np.abs((x_raw * scale_mm - x_true) / scale_mm).mean()))
-    experiment.log_metric('MAE for y', (np.abs((y_raw * scale_mm - y_true) / scale_mm).mean()))
-    experiment.log_metric('MAE for z', (np.abs((z_raw * scale_mm - z_true) / scale_mm).mean()))
-    print()
-    experiment.log_metric('MAE for tx', (np.abs((tx_raw - tx_true)).mean()))
-    experiment.log_metric('MAE for ty', (np.abs((ty_raw - ty_true)).mean()))
+   # experiment.log_metric('MAE for tx', (np.abs((tx_raw - tx_true)).mean()))
+  #  experiment.log_metric('MAE for ty', (np.abs((ty_raw - ty_true)).mean()))
 
 
 
 @click.command()
+@click.option('--energy_file', type=str, default='./data/E_pred.pt')
+@click.option('--energy_true_file', type=str, default='./data/E_true.pt')
 @click.option('--datafile', type=str, default='./data/train_200_preprocessed.pt')
 @click.option('--project_name', type=str, prompt='Enter project name', default='em_showers_clustering')
 @click.option('--workspace', type=str, prompt='Enter workspace name')
@@ -340,6 +362,8 @@ def calc_clustering_metrics(clusterized_bricks, experiment):
 @click.option('--edge_classifier_weights', type=str, default='EdgeClassifier_v1')
 def main(
         datafile='./data/train_200_preprocessed.pt',
+        energy_file='./data/E_pred.npy',
+        energy_true_file='./data/E_true.npy',
         hidden_dim=12,
         output_dim=12,
         num_layers_emulsion=3,
@@ -409,7 +433,7 @@ def main(
         }
         clusterized_bricks.append(clusterized_brick)
 
-    calc_clustering_metrics(clusterized_bricks, experiment=experiment)
+    calc_clustering_metrics(clusterized_bricks, experiment=experiment, energy_true_file=energy_true_file, energy_file=energy_file)
 
 
 if __name__ == "__main__":
